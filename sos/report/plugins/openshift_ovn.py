@@ -18,6 +18,7 @@ class OpenshiftOVN(Plugin, RedHatPlugin):
     plugin_name = "openshift_ovn"
     containers = ('ovnkube-master', 'ovnkube-node', 'ovn-ipsec',
                   'ovnkube-controller')
+    runtime = 'crio'
     profiles = ('openshift',)
 
     def setup(self):
@@ -69,7 +70,7 @@ class OpenshiftOVN(Plugin, RedHatPlugin):
         files = glob.glob("/var/run/ovn-ic/ovn-controller.*.ctl")
         for file in files:
             self.add_cmd_output([
-                f"ovs-appctl -t {file} ct-zone-list'"],
+                f"ovs-appctl -t {file} ct-zone-list"],
                 runtime='crio')
         self.add_cmd_output([
             'ovs-appctl -t ovs-monitor-ipsec tunnels/show',
