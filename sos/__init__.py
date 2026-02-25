@@ -14,7 +14,7 @@
 This module houses the i18n setup and message function. The default is to use
 gettext to internationalize messages.
 """
-__version__ = "4.10.1"
+__version__ = "4.11.0"
 
 import os
 import sys
@@ -148,7 +148,8 @@ class SoS():
 
         global_grp.add_argument('-z', '--compression-type',
                                 dest="compression_type",
-                                choices=['auto', 'gzip', 'xz'],
+                                choices=['auto', 'gzip', 'xz',
+                                         'none'],
                                 help="compression technology to use")
 
         # Group to make tarball encryption (via GPG/password) exclusive

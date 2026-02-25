@@ -34,7 +34,8 @@ from sos.cleaner.archives.sos import (SoSReportArchive, SoSReportDirectory,
                                       SoSCollectorDirectory)
 from sos.cleaner.archives.generic import DataDirArchive, TarballArchive
 from sos.cleaner.archives.insights import InsightsArchive
-from sos.utilities import (get_human_readable, import_module, ImporterHelper)
+from sos.utilities import (get_human_readable, import_module,
+                           ImporterHelper, is_executable)
 
 
 # an auxiliary method to kick off child processes over its instances
@@ -96,7 +97,8 @@ class SoSCleaner(SoSComponent):
         'no_update': False,
         'keep_binary_files': False,
         'target': '',
-        'usernames': []
+        'usernames': [],
+        'treat_certificates': 'obfuscate'
     }
 
     def __init__(self, parser=None, args=None, cmdline=None, in_place=False,
@@ -141,26 +143,41 @@ class SoSCleaner(SoSComponent):
             cleaner_dir,
             self.opts.skip_cleaning_files,
         ]
-        self.parsers = [
-            SoSHostnameParser(*parser_args),
-            SoSIPParser(*parser_args),
-            SoSIPv6Parser(*parser_args),
-            SoSMacParser(*parser_args),
-            SoSKeywordParser(*parser_args),
-            SoSUsernameParser(*parser_args),
+
+        parser_classes = [
+            SoSHostnameParser,
+            SoSIPParser,
+            SoSIPv6Parser,
+            SoSMacParser,
+            SoSKeywordParser,
+            SoSUsernameParser,
+        ]
+        parser_names = [
+            cls.__name__ for cls in parser_classes
         ]
 
         for _parser in self.opts.disable_parsers:
-            for _loaded in self.parsers:
-                _temp = _loaded.name.lower().split('parser', maxsplit=1)[0]
-                _loaded_name = _temp.strip()
-                if _parser.lower().strip() == _loaded_name:
-                    self.log_info(f"Disabling parser: {_loaded_name}")
+            found = False
+            for pname in parser_names:
+                parser_name = pname[3:-6].lower()  # strip "SoS" and "Parser"
+                if _parser.lower().strip() == parser_name:
+                    self.log_info(f"Disabling parser: {parser_name}")
                     self.ui_log.warning(
                         f"Disabling the '{_parser}' parser. Be aware that this"
                         " may leave sensitive plain-text data in the archive."
                     )
-                    self.parsers.remove(_loaded)
+                    parser_names.remove(pname)  # pylint: disable=W4701
+                    found = True
+                    break
+            if not found:
+                self.ui_log.warning(
+                    f"Failing to disable an unknown parser '{_parser}'."
+                )
+
+        self.parsers = [
+            globals()[cls_name](*parser_args)
+            for cls_name in parser_names
+        ]
 
         self.archive_types = [
             SoSReportDirectory,
@@ -300,6 +317,15 @@ third party.
         clean_grp.add_argument('--usernames', dest='usernames', default=[],
                                action='extend',
                                help='List of usernames to obfuscate')
+        clean_grp.add_argument('--treat-certificates', default='obfuscate',
+                               choices=['obfuscate', 'keep', 'remove'],
+                               dest='treat_certificates',
+                               help=(
+                                   'How to treat certificate files '
+                                   '[.csr .crt .pem]. Defaults to "obfuscate" '
+                                   'after convert the file to text. '
+                                   '"Key" certificate files are always '
+                                   'removed.'))
 
     def set_target_path(self, path):
         """For use by report and collect to set the TARGET option appropriately
@@ -320,12 +346,14 @@ third party.
             for archive in self.archive_types:
                 if archive.type_name == check_type:
                     _arc = archive(self.opts.target, self.tmpdir,
-                                   self.opts.keep_binary_files)
+                                   self.opts.keep_binary_files,
+                                   self.opts.treat_certificates)
         else:
             for arc in self.archive_types:
                 if arc.check_is_type(self.opts.target):
                     _arc = arc(self.opts.target, self.tmpdir,
-                               self.opts.keep_binary_files)
+                               self.opts.keep_binary_files,
+                               self.opts.treat_certificates)
                     break
         if not _arc:
             return
@@ -577,6 +605,30 @@ third party.
                     "WARNING: binary files that potentially contain sensitive "
                     "information will NOT be removed from the final archive\n"
                 )
+            if (self.opts.treat_certificates == "obfuscate"
+                    and not is_executable("openssl")):
+                self.opts.treat_certificates = "remove"
+                self.ui_log.warning(
+                    "WARNING: No `openssl` command available. Replacing "
+                    "`--treat-certificates` from `obfuscate` to `remove`."
+                )
+            if self.opts.treat_certificates == "obfuscate":
+                self.ui_log.warning(
+                    "WARNING: certificate files that potentially contain "
+                    "sensitive information will be CONVERTED to text and "
+                    "OBFUSCATED in the final archive.\n"
+                )
+            elif self.opts.treat_certificates == "keep":
+                self.ui_log.warning(
+                    "WARNING: certificate files that potentially contain "
+                    "sensitive information will be KEPT in the final "
+                    "archive as is.\n"
+                )
+            elif self.opts.treat_certificates == "remove":
+                self.ui_log.warning(
+                    "WARNING: certificate files that potentially contain "
+                    "sensitive information will be REMOVED in the final "
+                    "archive.\n")
             for report_path in self.report_paths:
                 self.ui_log.info(f"Obfuscating {report_path.archive_path}")
                 self.obfuscate_report(report_path)

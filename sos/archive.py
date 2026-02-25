@@ -35,6 +35,7 @@ P_FILE = "file"
 P_LINK = "link"
 P_NODE = "node"
 P_DIR = "dir"
+P_CONTFILE = "contaner file"
 
 
 class Archive:
@@ -729,6 +730,8 @@ class TarFileArchive(FileCacheArchive):
         _mode = 'w'
         if method == 'auto':
             method = 'xz' if find_spec('lzma') is not None else 'gzip'
+        if method == 'none':
+            method = None
         if method is not None:
             _comp_mode = method.strip('ip')
             self._archive_name = f"{self._archive_name}.{_comp_mode}"

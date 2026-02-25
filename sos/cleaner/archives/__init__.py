@@ -17,7 +17,8 @@ import tempfile
 import re
 
 from concurrent.futures import ProcessPoolExecutor
-from sos.utilities import file_is_binary
+from sos.utilities import (file_is_binary, sos_get_command_output,
+                           file_is_certificate)
 
 
 # python older than 3.8 will hit a pickling error when we go to spawn a new
@@ -63,7 +64,8 @@ class SoSObfuscationArchive():
     is_nested = False
     prep_files = {}
 
-    def __init__(self, archive_path, tmpdir, keep_binary_files):
+    def __init__(self, archive_path, tmpdir, keep_binary_files,
+                 treat_certificates):
         self.archive_path = archive_path
         self.final_archive_path = self.archive_path
         self.tmpdir = tmpdir
@@ -76,6 +78,7 @@ class SoSObfuscationArchive():
         self._load_self()
         self.archive_root = ''
         self.keep_binary_files = keep_binary_files
+        self.treat_certificates = treat_certificates
         self.parsers = ()
         self.log_info(
             f"Loaded {self.archive_path} as type {self.description}"
@@ -153,18 +156,18 @@ class SoSObfuscationArchive():
         for filename in flist:
             self.log_debug(f"    pid={os.getpid()}: obfuscating {filename}")
             try:
-                short_name = filename.split(self.archive_name + '/')[1]
-                if self.should_skip_file(short_name):
+                rel_name = os.path.relpath(filename, start=self.extracted_path)
+                if self.should_skip_file(rel_name):
                     continue
                 if (not self.keep_binary_files and
-                        self.should_remove_file(short_name)):
+                        self.should_remove_file(rel_name)):
                     # We reach this case if the option --keep-binary-files
                     # was not used, and the file is in a list to be removed
-                    self.remove_file(short_name)
+                    self.remove_file(rel_name)
                     continue
                 if (self.keep_binary_files and
                         (file_is_binary(filename) or
-                         self.should_remove_file(short_name))):
+                         self.should_remove_file(rel_name))):
                     # We reach this case if the option --keep-binary-files
                     # is used. In this case we want to make sure
                     # the cleaner doesn't try to clean a binary file
@@ -173,19 +176,36 @@ class SoSObfuscationArchive():
                     # don't run the obfuscation on the link, but on the actual
                     # file at some other point.
                     continue
+                is_certificate = file_is_certificate(filename)
+                if is_certificate:
+                    if is_certificate == "certificatekey":
+                        # Always remove certificate Key files
+                        self.remove_file(rel_name)
+                        continue
+                    if self.treat_certificates == "keep":
+                        continue
+                    if self.treat_certificates == "remove":
+                        self.remove_file(rel_name)
+                        continue
+                    if self.treat_certificates == "obfuscate":
+                        # since the original filename is deleted, we must
+                        # update both "filename" and "rel_name"
+                        filename = self.certificate_to_text(filename)
+                        rel_name = os.path.relpath(filename,
+                                                   start=self.extracted_path)
                 _parsers = [
                     _p for _p in self.parsers if not
                     any(
-                        _skip.match(short_name) for _skip in _p.skip_patterns
+                        _skip.match(rel_name) for _skip in _p.skip_patterns
                     )
                 ]
                 if not _parsers:
                     self.log_debug(
-                        f"Skipping obfuscation of {short_name or filename} "
+                        f"Skipping obfuscation of {rel_name or filename} "
                         f"due to matching file skip pattern"
                     )
                     continue
-                self.log_debug(f"Obfuscating {short_name or filename}")
+                self.log_debug(f"Obfuscating {rel_name or filename}")
                 subs = 0
                 with tempfile.NamedTemporaryFile(mode='w', dir=self.tmpdir) \
                         as tfile:
@@ -198,13 +218,13 @@ class SoSObfuscationArchive():
                                 tfile.write(line)
                             except Exception as err:
                                 self.log_debug(f"Unable to obfuscate "
-                                               f"{short_name}: {err}")
+                                               f"{rel_name}: {err}")
                     tfile.seek(0)
                     if subs:
                         shutil.copyfile(tfile.name, filename)
                         self.update_sub_count(subs)
 
-                self.obfuscate_filename(short_name, filename)
+                self.obfuscate_filename(rel_name, filename)
 
             except Exception as err:
                 self.log_debug(f"    pid={os.getpid()}: caught exception on "
@@ -288,6 +308,19 @@ class SoSObfuscationArchive():
             return tarfile.is_tarfile(self.archive_path)
         except Exception:
             return False
+
+    def certificate_to_text(self, fname):
+        """Convert a certificate to text. This is used when cleaner encounters
+        a certificate file and the option 'treat_certificates' is 'obfuscate'.
+        """
+        out_fn = f"{fname}.text"
+        self.log_info(f"Converting certificate file '{fname}' to text")
+        sos_get_command_output(
+            f"openssl storeutl -r -noout -out {out_fn} "
+            f"-text -certs {str(fname)}"
+        )
+        os.remove(fname)
+        return out_fn
 
     def remove_file(self, fname):
         """Remove a file from the archive. This is used when cleaner encounters

@@ -41,22 +41,36 @@ class AAPContainerized(Plugin, RedHatPlugin):
     def setup(self):
         # Check if username is passed as argument
         username = self.get_option("username")
+        self.aap_directory_name = self.get_option("directory")
         if not username:
-            self._log_error("Username is mandatory to collect "
-                            "AAP containerized setup logs")
-            return
+            self._log_warn("AAP username is missing, use '-k "
+                           "aap_containerized.username=<user>' to set it")
+            ps = self.exec_cmd("ps aux")
+            if ps["status"] == 0:
+                podman_users = set()
+                for line in ps["output"].splitlines():
+                    if ("/usr/bin/podman" in line) and \
+                       ("/.local/share/containers/storage/" in line):
+                        user, _ = line.split(maxsplit=1)
+                        podman_users.add(user)
+                if len(podman_users) == 1:
+                    username = podman_users.pop()
+                    self._log_warn(f"AAP username detected as '{username}'")
+                else:
+                    self._log_error("Unable to determine AAP username, "
+                                    "terminating plugin.")
+                    return
 
         # Grab aap installation directory under user's home
-        if not self.get_option("directory"):
+        if not self.aap_directory_name:
             user_home_directory = os.path.expanduser(f"~{username}")
-            aap_directory_name = self.path_join(user_home_directory, "aap")
-        else:
-            aap_directory_name = self.get_option("directory")
+            self.aap_directory_name = self.path_join(user_home_directory,
+                                                     "aap")
 
         # Don't collect cert and key files from the installation directory
-        if self.path_exists(aap_directory_name):
+        if self.path_exists(self.aap_directory_name):
             forbidden_paths = [
-                self.path_join(aap_directory_name, path)
+                self.path_join(self.aap_directory_name, path)
                 for path in [
                     "containers",
                     "tls",
@@ -79,10 +93,10 @@ class AAPContainerized(Plugin, RedHatPlugin):
                 ]
             ]
             self.add_forbidden_path(forbidden_paths)
-            self.add_copy_spec(aap_directory_name)
+            self.add_copy_spec(self.aap_directory_name)
         else:
-            self._log_error(f"Directory {aap_directory_name} does not exist "
-                            "or invalid absolute path provided")
+            self._log_error(f"Directory {self.aap_directory_name} does not "
+                            "exist or invalid absolute path provided.")
 
         # Gather output of following podman commands as user
         podman_commands = [
@@ -111,18 +125,48 @@ class AAPContainerized(Plugin, RedHatPlugin):
                     subdir="podman_inspect_logs"
             )
 
-        if "automation-controller-task" in aap_containers:
-            container = "automation-controller-task"
-            podman_commands = [
-                (f"su - {username} -c 'podman exec -it {container} bash -c"
-                 " \"awx-manage check_license --data\"'",
-                 "awx-manage_check_license_--data"),
-                (f"su - {username} -c 'podman exec -it {container} bash -c"
-                 " \"awx-manage list_instances\"'",
-                 "awx-manage_list_instances"),
-            ]
-            for command, filename in podman_commands:
-                self.add_cmd_output(command, suggest_filename=filename)
+        # command outputs from various containers
+        # the su command is needed because mimicking it via runas leads to
+        # stuck command execution
+        pod_cmds = {
+            "automation-controller-task": [
+                "awx-manage check_license --data",
+                "awx-manage list_instances",
+            ],
+            "automation-gateway": [
+                "automation-gateway-service status",
+                "aap-gateway-manage print_settings",
+                "aap-gateway-manage authenticators",
+                "aap-gateway-manage showmigrations",
+                "aap-gateway-manage list_services",
+                "aap-gateway-manage feature_flags --list",
+                "aap-gateway-manage --version",
+            ],
+            "automation-controller-web": [
+                "awx-manage showmigrations",
+                "awx-manage list_instances",
+                "awx-manage run_dispatcher --status",
+                "awx-manage run_callback_receiver --status",
+                "awx-manage check_license --data",
+                "awx-manage run_wsrelay --status",
+            ],
+            "automation-eda-api": [
+                "aap-eda-manage --version",
+                "aap-eda-manage showmigrations",
+            ],
+            "receptor": [
+                "receptorctl status",
+                "receptorclt work list",
+            ],
+        }
+        for pod, cmds in pod_cmds.items():
+            if pod in aap_containers:
+                for cmd in cmds:
+                    fname = self._mangle_command(cmd)
+                    self.add_cmd_output(f"su - {username} -c 'podman exec -it"
+                                        f"  {pod} bash -c \"{cmd}\"'",
+                                        suggest_filename=fname,
+                                        subdir=pod)
 
     # Function to fetch podman container names
     def _get_aap_container_names(self, username):
@@ -154,3 +198,39 @@ class AAPContainerized(Plugin, RedHatPlugin):
                 if process in ps_output['output']:
                     return True
         return False
+
+    def postproc(self):
+        # remove controller email password
+        file_path = f"{self.aap_directory_name}/controller/etc/settings.py"
+        jreg = r"(EMAIL_HOST_PASSWORD\s*=\s*)\'(.+)\'"
+        repl = r"\1********"
+        self.do_path_regex_sub(file_path, jreg, repl)
+
+        # remove gateway database password
+        file_path = f"{self.aap_directory_name}/gateway/etc/settings.py"
+        jreg = r"(\s*'PASSWORD'\s*:\s*)('.*')"
+        repl = r"\1********"
+        self.do_path_regex_sub(file_path, jreg, repl)
+
+        # Mask EDA optional secrets
+        file_path = f"{self.aap_directory_name}/eda/etc/settings.yaml"
+        regex = r"(\s*)(PASSWORD|MQ_USER_PASSWORD|SECRET_KEY)(:\s*)(.*$)"
+        replacement = r'\1\2\3********'
+        self.do_path_regex_sub(file_path, regex, replacement)
+
+        # Mask PASSWORD from print_settings command
+        jreg = r'((["\']?PASSWORD["\']?\s*[:=]\s*)[rb]?["\'])(.*?)(["\'])'
+        self.do_cmd_output_sub(
+            "aap-gateway-manage print_settings",
+            jreg,
+            r'\1**********\4')
+
+        # Mask SECRET_KEY from print_settings command
+        jreg = r'((SECRET_KEY\s*=\s*)([rb]?["\']))(.*?)(["\'])'
+        self.do_cmd_output_sub(
+            "aap-gateway-manage print_settings",
+            jreg,
+            r'\1**********\5')
+
+
+# vim: set et ts=4 sw=4 :

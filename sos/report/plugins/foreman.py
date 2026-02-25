@@ -25,6 +25,7 @@ class Foreman(Plugin):
     packages = ('foreman',)
     apachepkg = None
     dbhost = "localhost"
+    dbport = 5432
     dbpasswd = ""
     env = {"PGPASSWORD": ""}
     option_list = [
@@ -33,7 +34,9 @@ class Foreman(Plugin):
         PluginOpt('proxyfeatures', default=False,
                   desc='collect features of smart proxies'),
         PluginOpt('puma-gc', default=False,
-                  desc='collect Puma GC stats')
+                  desc='collect Puma GC stats'),
+        PluginOpt('cvfilters', default=False,
+                  desc='collect content view filters definition')
     ]
     pumactl = 'pumactl %s -S /usr/share/foreman/tmp/puma.state'
 
@@ -56,6 +59,8 @@ class Foreman(Plugin):
                     continue
                 if production_scope and match(r"\s+host:\s+\S+", line):
                     self.dbhost = line.split()[1]
+                if production_scope and match(r"\s+port:\s+\S+", line):
+                    self.dbport = line.split()[1]
                 if production_scope and match(r"\s+password:\s+\S+", line):
                     self.dbpasswd = line.split()[1]
                 # if line starts with a text, it is a different scope
@@ -184,6 +189,8 @@ class Foreman(Plugin):
                             env=self.env)
         self.collect_foreman_db()
         self.collect_proxies()
+        if self.get_option('cvfilters'):
+            self.collect_cv_filters()
 
     def collect_foreman_db(self):
         # pylint: disable=too-many-locals
@@ -240,6 +247,16 @@ class Foreman(Plugin):
             'LIMIT 100'
         )
 
+        smartcmd = (
+            "SELECT sp.id, sp.name, sp.url, sp.download_policy, "
+            "STRING_AGG(f.name, ', ') AS features "
+            "FROM smart_proxies AS sp "
+            "INNER JOIN smart_proxy_features AS spf "
+            "ON sp.id = spf.smart_proxy_id "
+            "INNER JOIN features AS f ON spf.feature_id = f.id "
+            "GROUP BY sp.id"
+        )
+
         # Populate this dict with DB queries that should be saved directly as
         # postgres formats them. The key will be the filename in the foreman
         # plugin directory, with the value being the DB query to run
@@ -255,8 +272,7 @@ class Foreman(Plugin):
             'audits_table_count': 'select count(*) from audits',
             'logs_table_count': 'select count(*) from logs',
             'fact_names_prefixes': factnamescmd,
-            'smart_proxies': 'select name,url,download_policy ' +
-                             'from smart_proxies'
+            'smart_proxies': smartcmd
         }
 
         # Same as above, but tasks should be in CSV output
@@ -305,6 +321,58 @@ class Foreman(Plugin):
                                         subdir='smart_proxies_features',
                                         timeout=10)
 
+    def collect_cv_filters(self):
+        """ Collect content view filters definition if requested """
+        cv_filters_cmd = (
+            "select f.id, f.name, f.type, f.content_view_id, "
+            "cv.name as content_view_name, f.description "
+            "from katello_content_view_filters as f "
+            "inner join katello_content_views as cv "
+            "on f.content_view_id = cv.id"
+        )
+        cv_pkg_rules_cmd = (
+            "select id, content_view_filter_id, name, min_version, "
+            "max_version from katello_content_view_package_filter_rules"
+        )
+        cv_group_rules_cmd = (
+            "select id, content_view_filter_id, name, uuid "
+            "from katello_content_view_package_group_filter_rules"
+        )
+        cv_errata_rules_cmd = (
+            "select id, content_view_filter_id, errata_id, start_date, "
+            "end_date, types from "
+            "katello_content_view_erratum_filter_rules"
+        )
+        cv_module_rules_cmd = (
+            "select * from "
+            "katello_content_view_module_stream_filter_rules"
+        )
+        cv_docker_rules_cmd = (
+            "select id, content_view_filter_id, name "
+            "from katello_content_view_docker_filter_rules"
+        )
+        cv_deb_rules_cmd = (
+            "select id, content_view_filter_id, name, version, "
+            "min_version, max_version "
+            "from katello_content_view_deb_filter_rules"
+        )
+
+        filter_tables = {
+            'katello_cv_filters': cv_filters_cmd,
+            'katello_cv_package_rules': cv_pkg_rules_cmd,
+            'katello_cv_group_rules': cv_group_rules_cmd,
+            'katello_cv_errata_rules': cv_errata_rules_cmd,
+            'katello_cv_module_rules': cv_module_rules_cmd,
+            'katello_cv_docker_rules': cv_docker_rules_cmd,
+            'katello_cv_deb_rules': cv_deb_rules_cmd
+        }
+
+        for table, query in filter_tables.items():
+            _cmd = self.build_query_cmd(query)
+            self.add_cmd_output(_cmd, suggest_filename=table,
+                                subdir='content_view_filters',
+                                timeout=600, sizelimit=100, env=self.env)
+
     def build_query_cmd(self, query, csv=False, binary="psql"):
         """
         Builds the command needed to invoke the pgsql query as the postgres
@@ -316,8 +384,8 @@ class Foreman(Plugin):
         if csv:
             query = f"COPY ({query}) TO STDOUT " \
                     "WITH (FORMAT 'csv', DELIMITER ',', HEADER)"
-        _dbcmd = "%s --no-password -h %s -p 5432 -U foreman -d foreman -c %s"
-        return _dbcmd % (binary, self.dbhost, quote(query))
+        _dbcmd = "%s --no-password -h %s -p %s -U foreman -d foreman -c %s"
+        return _dbcmd % (binary, self.dbhost, self.dbport, quote(query))
 
     def postproc(self):
         self.do_path_regex_sub(

@@ -42,6 +42,7 @@ class AAPGatewayPlugin(Plugin, RedHatPlugin):
             "aap-gateway-manage authenticators",
             "aap-gateway-manage showmigrations",
             "aap-gateway-manage list_services",
+            "aap-gateway-manage feature_flags --list",
             "aap-gateway-manage --version",
         ])
         self.add_dir_listing("/etc/ansible-automation-platform/",
@@ -49,8 +50,8 @@ class AAPGatewayPlugin(Plugin, RedHatPlugin):
 
     def postproc(self):
         # remove database password
-        jreg = r"(DATABASE_PASSWORD)(\s*)(=|:)(\s*)(.*)"
-        repl = r"\1\2\3\4********"
+        jreg = r"(\s*'PASSWORD'\s*:\s*)('.*')"
+        repl = r"\1********"
         self.do_path_regex_sub(
             "/etc/ansible-automation-platform/gateway/settings.py",
             jreg,

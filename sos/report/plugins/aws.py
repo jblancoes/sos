@@ -19,12 +19,9 @@ class Aws(Plugin, IndependentPlugin):
     profiles = ('virt',)
 
     def _is_ec2(self):
-        try:
-            with open('/sys/devices/virtual/dmi/id/sys_vendor',
-                      encoding='utf-8') as f:
-                return 'Amazon' in f.read()
-        except FileNotFoundError:
-            return False
+        dmi_files = ("/sys/devices/virtual/dmi/id/sys_vendor",
+                     "/sys/devices/virtual/dmi/id/bios_version")
+        return bool(self.file_grep(r"(Amazon|.*amazon)", *dmi_files))
 
     # Called by sos to determine if the plugin will run
     def check_enabled(self):
@@ -41,21 +38,19 @@ class Aws(Plugin, IndependentPlugin):
 
         # Try to get an IMDSv2 token
         token_url = 'http://169.254.169.254/latest/api/token'
-        token_cmd = [
-            'curl', '-sS', '-X', 'PUT', '-H',
-            'X-aws-ec2-metadata-token-ttl-seconds: 21600',
-            token_url]
+        token_cmd = f'curl -sS -X PUT -H \
+            X-aws-ec2-metadata-token-ttl-seconds:21600 {token_url}'
 
         try:
-            token = self.exec_cmd(token_cmd, timeout=1)
+            token = self.exec_cmd(token_cmd, timeout=1)['output']
         except Exception:
             token = ''
 
         # Add header only if token retrieval succeeded
-        token_header = []
+        token_header = ''
 
         if token:
-            token_header = ['-H', f'X-aws-ec2-metadata-token: {token}']
+            token_header = f'-H X-aws-ec2-metadata-token:{token}'
 
         # List of metadata paths we want to get
         metadata_paths = [
@@ -73,7 +68,7 @@ class Aws(Plugin, IndependentPlugin):
             meta_url = base_url + path
             safe_name = path.replace('/', '_')
             self.add_cmd_output(
-                    ['curl', '-sS'] + token_header + [meta_url],
+                    f'curl -sS {token_header} {meta_url}',
                     suggest_filename=f'aws_metadata_{safe_name}.txt'
             )
 

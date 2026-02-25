@@ -149,7 +149,8 @@ class SoSReport(SoSComponent):
         'upload_s3_object_prefix': None,
         'upload_target': None,
         'add_preset': '',
-        'del_preset': ''
+        'del_preset': '',
+        'treat_certificates': 'obfuscate'
     }
 
     def __init__(self, parser, args, cmdline):
@@ -396,6 +397,15 @@ class SoSReport(SoSComponent):
         cleaner_grp.add_argument('--usernames', dest='usernames', default=[],
                                  action='extend',
                                  help='List of usernames to obfuscate')
+        cleaner_grp.add_argument('--treat-certificates', default='obfuscate',
+                                 choices=['obfuscate', 'keep', 'remove'],
+                                 dest='treat_certificates',
+                                 help=(
+                                    'How to treat the certificate files '
+                                    '[.csr .crt .pem]. Defaults to "obfuscate"'
+                                    ' after convert the file to text. '
+                                    ' "Key" certificate files are always '
+                                    'removed.'))
 
     @classmethod
     def display_help(cls, section):
@@ -1037,7 +1047,7 @@ class SoSReport(SoSComponent):
             self.ui_log.info(_("The following plugins are currently enabled:"))
             self.ui_log.info("")
             for (plugname, plug) in self.loaded_plugins:
-                self.ui_log.info(f" {plugname:<20} {plug.get_description()}")
+                self.ui_log.info(f" {plugname:<30} {plug.get_description()}")
         else:
             self.ui_log.info(_("No plugin enabled."))
         self.ui_log.info("")
@@ -1088,7 +1098,7 @@ class SoSReport(SoSComponent):
                 if tmpopt is None:
                     tmpopt = 0
 
-                self.ui_log.info(f" {f'{opt.plugin}.{opt.name}':<35} "
+                self.ui_log.info(f" {f'{opt.plugin}.{opt.name}':<40} "
                                  f"{tmpopt:<15} {opt.desc}")
         else:
             self.ui_log.info(_("No plugin options available."))
@@ -1870,9 +1880,10 @@ class SoSReport(SoSComponent):
             if not self.opts.no_report:
                 self.generate_reports()
             if not self.opts.no_postproc:
+                self.ui_log.info('Starting post-processing of collected data')
                 self.postproc()
             else:
-                self.ui_log.info("Skipping postprocessing of collected data")
+                self.ui_log.info("Skipping post-processing of collected data")
             self.version()
             return self.final_work()
 
